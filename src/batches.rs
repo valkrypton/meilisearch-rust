@@ -1,7 +1,7 @@
-use serde::{Deserialize, Serialize};
-use time::OffsetDateTime;
-
 use crate::{client::Client, errors::Error, request::HttpClient};
+use serde::{Deserialize, Serialize};
+use std::collections::HashMap;
+use time::OffsetDateTime;
 
 /// Types and queries for the Meilisearch Batches API.
 ///
@@ -10,30 +10,26 @@ use crate::{client::Client, errors::Error, request::HttpClient};
 #[serde(rename_all = "camelCase")]
 pub struct Batch {
     /// Unique identifier of the batch.
-    pub uid: u32,
-    /// When the batch was enqueued.
-    #[serde(default, with = "time::serde::rfc3339::option")]
-    pub enqueued_at: Option<OffsetDateTime>,
+    pub uid: i64,
+    /// Batch progress.
+    pub progress: Option<BatchProgress>,
+    /// Batch stats.
+    pub stats: BatchStats,
+    /// The total elapsed time the batch spent in the processing state, in ISO 8601 format.
+    pub duration: Option<String>,
     /// When the batch started processing.
     #[serde(default, with = "time::serde::rfc3339::option")]
     pub started_at: Option<OffsetDateTime>,
     /// When the batch finished processing.
     #[serde(default, with = "time::serde::rfc3339::option")]
     pub finished_at: Option<OffsetDateTime>,
-    /// Index uid related to this batch (if applicable).
-    #[serde(skip_serializing_if = "Option::is_none")]
-    pub index_uid: Option<String>,
-    /// The task uids that are part of this batch.
-    #[serde(skip_serializing_if = "Option::is_none")]
-    pub task_uids: Option<Vec<u32>>,
     /// The strategy that caused the autobatcher to stop batching tasks.
-    ///
     /// Introduced in Meilisearch v1.15.
     #[serde(skip_serializing_if = "Option::is_none")]
     pub batch_strategy: Option<BatchStrategy>,
 }
 
-/// Reason why the autobatcher stopped batching tasks.
+/// Reason why the auto batcher stopped batching tasks.
 #[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize, Deserialize)]
 #[serde(rename_all = "snake_case")]
 #[non_exhaustive]
@@ -65,12 +61,49 @@ pub struct BatchesResults {
 pub struct BatchesQuery<'a, Http: HttpClient> {
     #[serde(skip_serializing)]
     client: &'a Client<Http>,
+    ///Select batches containing the tasks with the specified uids.
+    /// Separate multiple task uids with a comma
+    #[serde(skip_serializing_if = "Vec::is_empty")]
+    uids: Vec<i64>,
+    /// Filter batches by their uid. Separate multiple batch uids with a comma
+    #[serde(skip_serializing_if = "Vec::is_empty")]
+    batch_uids: Vec<i64>,
+    /// Select batches containing tasks affecting the specified indexes.
+    /// Separate multiple indexUids with a comma
+    #[serde(skip_serializing_if = "Vec::is_empty")]
+    index_uids: Vec<String>,
+    /// Select batches containing tasks with the specified status.
+    #[serde(skip_serializing_if = "Vec::is_empty")]
+    statuses: Statuses,
+    /// Select batches containing tasks with the specified type.
+    #[serde(skip_serializing_if = "Vec::is_empty")]
+    types: Types,
     /// Maximum number of batches to return.
     #[serde(skip_serializing_if = "Option::is_none")]
     limit: Option<u32>,
     /// The first batch uid that should be returned.
     #[serde(skip_serializing_if = "Option::is_none")]
     from: Option<u32>,
+    /// If true, returns results in the reverse order, from oldest to most recent
+    reverse: bool,
+    /// Select batches containing tasks with the specified enqueuedAt field
+    #[serde(skip_serializing_if = "Option::is_none")]
+    before_enqueued_at: Option<OffsetDateTime>,
+    /// Select batches containing tasks with the specified startedAt field
+    #[serde(skip_serializing_if = "Option::is_none")]
+    before_started_at: Option<OffsetDateTime>,
+    /// Select batches containing tasks with the specified finishedAt field
+    #[serde(skip_serializing_if = "Option::is_none")]
+    before_finished_at: Option<OffsetDateTime>,
+    /// Select batches containing tasks with the specified enqueuedAt field
+    #[serde(skip_serializing_if = "Option::is_none")]
+    after_enqueued_at: Option<OffsetDateTime>,
+    /// Select batches containing tasks with the specified startedAt field
+    #[serde(skip_serializing_if = "Option::is_none")]
+    after_started_at: Option<OffsetDateTime>,
+    /// Select batches containing tasks with the specified finishedAt field
+    #[serde(skip_serializing_if = "Option::is_none")]
+    after_finished_at: Option<OffsetDateTime>,
 }
 
 impl<'a, Http: HttpClient> BatchesQuery<'a, Http> {
@@ -78,8 +111,20 @@ impl<'a, Http: HttpClient> BatchesQuery<'a, Http> {
     pub fn new(client: &'a Client<Http>) -> BatchesQuery<'a, Http> {
         BatchesQuery {
             client,
+            uids: vec![],
+            batch_uids: vec![],
+            index_uids: vec![],
+            statuses: Statuses::default(),
+            types: Types::default(),
             limit: None,
             from: None,
+            reverse: false,
+            before_enqueued_at: None,
+            before_started_at: None,
+            before_finished_at: None,
+            after_enqueued_at: None,
+            after_started_at: None,
+            after_finished_at: None,
         }
     }
 
@@ -99,6 +144,79 @@ impl<'a, Http: HttpClient> BatchesQuery<'a, Http> {
     pub async fn execute(&self) -> Result<BatchesResults, Error> {
         self.client.get_batches_with(self).await
     }
+}
+
+#[derive(Debug, Clone, Deserialize)]
+pub struct BatchProgress {
+    pub steps: Vec<BatchProgressStep>,
+    pub percentage: f64,
+}
+
+#[derive(Debug, Clone, Deserialize)]
+#[serde(rename_all = "camelCase")]
+pub struct BatchProgressStep {
+    pub current_step: String,
+    pub finished: i32,
+    pub total: i32,
+}
+
+#[derive(Debug, Clone, Deserialize)]
+#[serde(rename_all = "camelCase")]
+pub struct BatchStats {
+    pub total_nb_tasks: i32,
+    pub status: Statuses,
+    pub types: Types,
+    pub indexed_uids: HashMap<String, i32>,
+    pub progress_trace: HashMap<String, String>,
+    pub write_channel_congestion: BatchWriteChannelCongestion,
+    pub internal_database_sizes: BatchInternalDatabaseSizes,
+}
+
+#[derive(Debug, Clone, Deserialize)]
+#[serde(rename_all = "camelCase")]
+pub struct BatchWriteChannelCongestion {
+    pub attempts: i32,
+    pub blocking_attempts: i32,
+    pub blocking_ratio: f64,
+}
+
+#[derive(Debug, Clone, Deserialize)]
+#[serde(rename_all = "camelCase")]
+pub struct BatchInternalDatabaseSizes {
+    pub external_documents_id: String,
+    pub word_docs_id: String,
+    pub word_pair_proximity_ids: String,
+    pub word_position_doc_ids: String,
+    pub word_fid_doc_ids: String,
+    pub field_id_word_count_doc_ids: String,
+    pub documents: String,
+}
+
+#[derive(Debug, Clone, Deserialize, Serialize, Default)]
+pub struct Statuses {
+    pub enqueued: Option<u32>,
+    pub processing: Option<u32>,
+    pub succeeded: Option<u32>,
+    pub failed: Option<u32>,
+    pub canceled: Option<u32>,
+}
+
+#[derive(Debug, Clone, Deserialize, Serialize, Default)]
+#[serde(rename_all = "camelCase")]
+pub struct Types {
+    pub index_creation: Option<u32>,
+    pub index_update: Option<u32>,
+    pub index_deletion: Option<u32>,
+    pub index_swap: Option<u32>,
+    pub document_addition_or_update: Option<u32>,
+    pub document_deletion: Option<u32>,
+    pub settings_update: Option<u32>,
+    pub dump_creation: Option<u32>,
+    pub task_cancellation: Option<u32>,
+    pub task_deletion: Option<u32>,
+    pub upgrade_database: Option<u32>,
+    pub document_edition: Option<u32>,
+    pub snapshot_creation: Option<u32>,
 }
 
 #[cfg(test)]
